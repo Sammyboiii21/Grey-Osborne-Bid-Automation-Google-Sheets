@@ -1,0 +1,159 @@
+function updateGASeenAndNewBids() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dailySheet = ss.getSheetByName("Daily Pull G & A");
+  const seenSheet = ss.getSheetByName("Seen G & A");
+  const newBidsSheet = ss.getSheetByName("New Bids G & A");
+
+  dailySheet.activate();
+  SpreadsheetApp.flush();
+
+  const dailyData = dailySheet.getDataRange().getValues();
+  const seenData = seenSheet.getDataRange().getValues();
+
+  if (dailyData.length < 2) return;
+
+  const headers = dailyData[0];
+
+  // Normalize headers
+  const normalized = headers.map(h => h.toString().trim().toUpperCase());
+  const cityIndex = normalized.indexOf("CITY");
+  const projectIndex = normalized.indexOf("PROJECT");
+  const linkIndex = normalized.indexOf("LINK");
+  const bidDateIndex = normalized.indexOf("BID_DATE");
+  const revisedBidIndex = normalized.indexOf("REVISED_BID_DATE");
+
+  if (
+    cityIndex === -1 ||
+    projectIndex === -1 ||
+    linkIndex === -1 ||
+    bidDateIndex === -1 ||
+    revisedBidIndex === -1
+  ) {
+    throw new Error("Missing one or more required columns: City, Project, Link, Bid_Date, Revised_Bid_Date.");
+  }
+
+  // Build set of seen Bid_IDs (col 0 in Seen is Bid_ID)
+  const seenIDs = new Set(seenData.slice(1).map(row => String(row[0]).trim()));
+
+  // Only unique Bid_IDs vs Seen
+  const newRows = dailyData.slice(1).filter(row => {
+    const link = row[linkIndex];
+    const bidId = link ? link.toString().split("project_id=")[1] : "";
+    return bidId && !seenIDs.has(bidId);
+  });
+
+  // Map for email (bidId -> {link, project})
+  const idMeta = {};
+  newRows.forEach(row => {
+    const link = row[linkIndex] ? row[linkIndex].toString() : "";
+    const bidId = link ? link.split("project_id=")[1] : "";
+    if (bidId) idMeta[bidId] = { link, project: row[projectIndex] };
+  });
+
+  // Transform rows (format City, hyperlink Project, split dates, drop Link)
+  const cleanedRows = newRows.map(row => {
+    const link = row[linkIndex];
+    const bidId = link ? link.toString().split("project_id=")[1] : "";
+
+    const projectHyperlink = `=HYPERLINK("${link}", "${row[projectIndex]}")`;
+
+    let city = row[cityIndex];
+    if (city && city.toString().includes(",")) city = city.toString().split(",")[0].trim();
+
+    let bidDate = "", bidTime = "";
+    if (row[bidDateIndex]) {
+      const p = row[bidDateIndex].toString().split("-");
+      bidDate = p[0] ? p[0].trim() : "";
+      bidTime = p[1] ? p[1].trim() : "";
+    }
+
+    let revisedDate = "", revisedTime = "";
+    if (row[revisedBidIndex]) {
+      const p = row[revisedBidIndex].toString().split("-");
+      revisedDate = p[0] ? p[0].trim() : "";
+      revisedTime = p[1] ? p[1].trim() : "";
+    }
+
+    return [
+      bidId,
+      city,
+      projectHyperlink,
+      bidDate,
+      bidTime,
+      revisedDate,
+      revisedTime,
+      ...row.slice(revisedBidIndex + 1, linkIndex)
+    ];
+  });
+
+  // Headers (drop Link)
+  const newHeaders = [
+    "Bid_ID",
+    "City",
+    "Project",
+    "Bid_Date",
+    "Bid_Time",
+    "Revised_Bid_Date",
+    "Revised_Bid_Time",
+    ...headers.slice(revisedBidIndex + 1, linkIndex)
+  ];
+
+  // Write ALL (unfiltered) to Seen G & A
+  seenSheet.getRange(1, 1, 1, newHeaders.length).setValues([newHeaders]);
+  if (cleanedRows.length > 0) {
+    seenSheet.getRange(seenSheet.getLastRow() + 1, 1, cleanedRows.length, cleanedRows[0].length).setValues(cleanedRows);
+  }
+
+  // Excluded cities/counties (case-insensitive)
+  const excludedLocalities = [
+    "Arlington","Auburn","Aberdeen","Brush Prairie","Black Diamond","Battle Ground","Bellevue","Bellingham","Bothell","Brier","Bremerton","Burien","Buckley",
+    "Camp Murray","Clark Co.","Camas","Covington","Cowlitz Co.","Clallam Co.","Coeur d'Alene","DuPont","Des Moines","Everett","Edmonds","Edgewood","Enumclaw","Federal Way","Ferndale","Friday Harbor",
+    "Fife","Gig Harbor","Graham","Happy Valley","Ilwaco","Issaquah","JBLM","Kalama","Kenmore","King Co.","Kirkland","Kent","Kitsap Co.","Lacey","Lakewood",
+    "Longview","Lewis Co.","Lilliwaup","Long Beach","Lynnwood","Mercer Island","Mason Co.","McNeil Island","Mount Vernon","Medina","Normandy Park","North Bend","Olympia","Pierce Co.","Poulsbo","Puyallup","Raymond",
+    "Redmond","Renton","Ridgefield","Rochester","Snoqualmie","SeaTac","Seattle","Shelton","Shoreline","Skagit Co.","Snohomish Co.","Steilacoom","Sultan","Sumner","Stanwood","Sequim","San Juan Co.","Tacoma","Thurston Co.","Union","Vancouver","Vashon Island","Woodinville","Whatcom Co.","Washougal","Westport","Winlock","Woodland"
+  ].map(s => s.toUpperCase());
+
+  // Filter only for New Bids G & A
+  const filteredRows = cleanedRows.filter(r => {
+    const city = r[1] ? r[1].toString().toUpperCase() : "";
+    return !excludedLocalities.includes(city);
+  });
+
+  // Write New Bids G & A (filtered)
+  newBidsSheet.clearContents();
+  newBidsSheet.getRange(1, 1, 1, newHeaders.length).setValues([newHeaders]);
+  if (filteredRows.length > 0) {
+    newBidsSheet.getRange(2, 1, filteredRows.length, filteredRows[0].length).setValues(filteredRows);
+  }
+
+  // EMAIL — short summary of filtered new bids only, City above Project
+  if (filteredRows.length > 0) {
+    const introLine = `<p>There are <strong>${filteredRows.length}</strong> new bids from Gray &amp; Osborne as of <strong>${new Date().toLocaleDateString()}</strong>.</p>`;
+    const emailBody = filteredRows.map(r => {
+      const bidId = r[0];
+      const city = r[1] || "";
+      const projURL = idMeta[bidId] ? idMeta[bidId].link : "";
+      const projTxt = idMeta[bidId] ? idMeta[bidId].project : "";
+      const projA = projURL ? `<a href="${projURL}">${projTxt}</a>` : projTxt;
+      const bidDate = r[3] || "";
+      const bidTime = r[4] || "";
+      return `<p><strong>City:</strong> ${city}<br><strong>Project:</strong> ${projA}<br><strong>Date:</strong> ${bidDate}<br><strong>Time:</strong> ${bidTime}</p>`;
+    }).join("<hr>");
+
+    const htmlBody = `
+      <h3>New Bids from Gray &amp; Osborne</h3>
+      ${introLine}
+      ${emailBody}
+    `;
+
+    GmailApp.sendEmail(
+      "samk@ttcexcavation.com, tylers@ttcexcavation.com",
+      "New Bids from Gray & Osborne",
+      "",
+      { htmlBody: htmlBody }
+    );
+  }
+
+  // Clear Daily Pull G & A
+  dailySheet.clearContents();
+}
