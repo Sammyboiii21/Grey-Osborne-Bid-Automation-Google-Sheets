@@ -173,7 +173,3 @@ function updateGASeenAndNewBids() {
   // Clear Daily Pull G & A
   dailySheet.clearContents();
 }
-
-  // Clear Daily Pull G & A
-  dailySheet.clearContents();
-}
